@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -118,8 +119,9 @@ func (c *EtcdClient) request(req *http.Request) (*EtcdResponse, error) {
 
 func main() {
 	rand.Seed(time.Now().Unix())
+	shard := fmt.Sprintf("shard-%d", rand.Int31()%100)
 	for i := 0; i < 30; i++ {
-		go run("shard-5", i)
+		go run(shard, i)
 	}
 	<-make(chan struct{})
 }
@@ -136,6 +138,8 @@ func run(shard string, id int) {
 	for success := true; success; success = loop(&state, client) {
 	}
 }
+
+var leaderCount int32 = 0
 
 func loop(state *State, client *EtcdClient) bool {
 	print := func(format string, arguments ...interface{}) {
@@ -157,7 +161,8 @@ func loop(state *State, client *EtcdClient) bool {
 			return false
 		}
 		if resp.ErrorCode == 0 {
-			print("-> gain")
+			count := atomic.AddInt32(&leaderCount, 1)
+			print("-> gain: %d", count)
 			_, err := client.Put(
 				broadcastKey,
 				state.id,
@@ -168,16 +173,15 @@ func loop(state *State, client *EtcdClient) bool {
 				return false
 			}
 			state.leader = true
-		} else {
-			print("-x failed")
 		}
 	} else if resp.ErrorCode == 0 {
 		if resp.Node.Value == state.id {
 			// print("lock present - is leader")
 			if rand.Float32() < 0.25 {
 				// simulate high latency - sleep
-				print("-- give up")
-				time.Sleep(state.ttl * 10)
+				// print("-- give up")
+				print("-- losing: %d", leaderCount)
+				time.Sleep(state.ttl * 2)
 			}
 			resp, err := client.Put(
 				leaderKey,
@@ -201,8 +205,10 @@ func loop(state *State, client *EtcdClient) bool {
 				}
 			} else {
 				// print("failed to renew: %s", resp.Message)
-				// print("<- lost")
+				count := atomic.AddInt32(&leaderCount, -1)
+				print("<- lost: %d", count)
 				state.leader = false
+				time.Sleep(state.ttl * 2)
 			}
 		} else {
 			// print("lock present - not leader")
